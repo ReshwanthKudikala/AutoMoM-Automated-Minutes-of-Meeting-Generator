@@ -2,9 +2,15 @@ Flask>=2.2
 python-dotenv
 ffmpeg-python
 soundfile
-numpy
+numpy==2.3.5
 python-docx
 tqdm
 requests
 sentencepiece
-data
+yagmail
+openai
+torch
+transformers
+pyannote.audio
+whisper
+markdown

@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AutoMoM - {{ filename }}</title>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js/styles/github.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js/lib/highlight.min.js"></script>
+    <style>
+      :root {
+        --bg: #f4f7fb;
+        --surface: #ffffff;
+        --border: #d8e2ef;
+        --primary: #3b82f6;
+        --primary-dark: #1d4ed8;
+        --text: #102a43;
+        --muted: #627d98;
+        --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: 'Inter', 'Segoe UI', -apple-system, system-ui, sans-serif;
+        background: linear-gradient(135deg, #edf2ff 0%, #f8fafc 99%);
+        color: var(--text);
+        margin: 0;
+      }
+      .site-wrap { max-width: 860px; margin: 30px auto; padding: 0 16px; }
+      header {
+        background: #ffffff;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+        padding: 16px 20px;
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      h1 { margin: 0; font-size: 1.6rem; }
+      nav a {
+        color: var(--text);
+        text-decoration: none;
+        font-weight: 600;
+        margin-left: 14px;
+        padding: 8px 12px;
+        border-radius: 8px;
+      }
+      nav a:hover { background: #edf2ff; color: var(--primary-dark); }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: var(--shadow);
+      }
+      .actions { margin-bottom: 14px; color: var(--muted); }
+      .actions strong { color: var(--text); }
+      
+      /* Markdown styles */
+      .markdown-content {
+        line-height: 1.6;
+        color: var(--text);
+      }
+      .markdown-content h1,
+      .markdown-content h2,
+      .markdown-content h3,
+      .markdown-content h4,
+      .markdown-content h5,
+      .markdown-content h6 {
+        margin-top: 24px;
+        margin-bottom: 12px;
+        font-weight: 600;
+        color: var(--primary-dark);
+      }
+      .markdown-content h1 { font-size: 1.8rem; }
+      .markdown-content h2 { font-size: 1.5rem; }
+      .markdown-content h3 { font-size: 1.3rem; }
+      .markdown-content h4 { font-size: 1.1rem; }
+      .markdown-content h5 { font-size: 1rem; }
+      .markdown-content h6 { font-size: 0.95rem; }
+      
+      .markdown-content p {
+        margin: 12px 0;
+      }
+      
+      .markdown-content ul,
+      .markdown-content ol {
+        margin: 12px 0;
+        padding-left: 24px;
+      }
+      
+      .markdown-content li {
+        margin: 6px 0;
+      }
+      
+      .markdown-content code {
+        background: #f0f4f8;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.9em;
+        color: #d73a49;
+      }
+      
+      .markdown-content pre {
+        background: #f0f4f8;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        overflow-x: auto;
+        margin: 16px 0;
+      }
+      
+      .markdown-content pre code {
+        background: none;
+        padding: 0;
+        color: var(--text);
+      }
+      
+      .markdown-content blockquote {
+        border-left: 4px solid var(--primary);
+        padding-left: 16px;
+        margin: 16px 0;
+        color: var(--muted);
+        font-style: italic;
+      }
+      
+      .markdown-content table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 16px 0;
+      }
+      
+      .markdown-content table th,
+      .markdown-content table td {
+        border: 1px solid var(--border);
+        padding: 8px 12px;
+        text-align: left;
+      }
+      
+      .markdown-content table th {
+        background: #f0f4f8;
+        font-weight: 600;
+        color: var(--primary-dark);
+      }
+      
+      .markdown-content a {
+        color: var(--primary);
+        text-decoration: none;
+      }
+      
+      .markdown-content a:hover {
+        text-decoration: underline;
+        color: var(--primary-dark);
+      }
+      
+      .markdown-content hr {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 24px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="site-wrap">
+    <header>
+      <h1>{{ filename }}</h1>
+      <nav>
+        <a href="/moms" style="margin-right: 12px;">Back to list</a>
+        <a href="{{ url_for('upload.download_mom', filename=filename) }}">Download</a>
+      </nav>
+    </header>
+
+    <div class="card">
+      <div class="actions">
+        <span><strong>File:</strong> {{ filename }}</span>
+      </div>
+      <div class="markdown-content" id="content"></div>
+    </div>
+    </div>
+
+    <script>
+      // Configure marked options
+      marked.setOptions({
+        breaks: true,
+        gfm: true,
+        headerIds: true,
+        mangle: false
+      });
+      
+      // Configure highlight.js for code blocks
+      const renderer = new marked.Renderer();
+      const originalCodeBlock = renderer.code.bind(renderer);
+      renderer.code = function(code, language) {
+        if (language && hljs.getLanguage(language)) {
+          const highlighted = hljs.highlight(code, { language: language }).value;
+          return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
+        }
+        return `<pre><code>${code}</code></pre>`;
+      };
+      
+      marked.setOptions({ renderer });
+      
+      const rawContent = {{ content | tojson | safe }};
+      const htmlContent = (typeof marked !== 'undefined') ? marked.parse(rawContent) : rawContent;
+      document.getElementById('content').innerHTML = htmlContent;
+    </script>
+  </body>
+</html>

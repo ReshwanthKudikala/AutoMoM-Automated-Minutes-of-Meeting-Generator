@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AutoMoM - Share {{ filename }}</title>
+    <style>
+      :root {
+        --bg: #f4f7fb;
+        --surface: #ffffff;
+        --border: #d8e2ef;
+        --primary: #3b82f6;
+        --primary-dark: #1d4ed8;
+        --accent: #22c55e;
+        --text: #102a43;
+        --muted: #627d98;
+        --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: 'Inter', 'Segoe UI', -apple-system, system-ui, sans-serif;
+        background: linear-gradient(135deg, #edf2ff 0%, #f8fafc 99%);
+        color: var(--text);
+        margin: 0;
+      }
+      .site-wrap { max-width: 860px; margin: 30px auto; padding: 0 16px; }
+      header {
+        background: #ffffff;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+        padding: 16px 20px;
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      h1 { margin: 0; font-size: 1.6rem; }
+      nav a {
+        color: var(--text);
+        text-decoration: none;
+        font-weight: 600;
+        margin-left: 14px;
+        padding: 8px 12px;
+        border-radius: 8px;
+      }
+      nav a:hover { background: #edf2ff; color: var(--primary-dark); }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: var(--shadow);
+        margin-bottom: 20px;
+      }
+      pre { white-space: pre-wrap; word-wrap: break-word; line-height: 1.5; }
+      .actions { margin-bottom: 14px; color: var(--muted); }
+      .actions strong { color: var(--text); }
+      .form-field { margin-bottom: 16px; }
+      label { display:block; font-weight: 600; margin-bottom: 8px; color: var(--muted); }
+      textarea {
+        width:100%;
+        border:1px solid #cbd5e1;
+        border-radius:8px;
+        padding:10px;
+        font-size:0.98rem;
+        background:#fff;
+        min-height: 80px;
+        resize: vertical;
+      }
+      button {
+        background-color: var(--primary);
+        color:white;
+        border:none;
+        border-radius:10px;
+        padding: 12px 18px;
+        font-size: 1rem;
+        font-weight: 700;
+        cursor:pointer;
+        transition: all 0.18s ease;
+      }
+      button:hover { background-color: var(--primary-dark); }
+      .message { margin-top: 12px; padding: 10px; border-radius: 8px; }
+      .message.error { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; }
+      .message.success { background: #f0fdf4; color: #16a34a; border: 1px solid #bbf7d0; }
+    </style>
+  </head>
+  <body>
+    <div class="site-wrap">
+    <header>
+      <h1>Share MoM: {{ filename }}</h1>
+      <nav>
+        <a href="/">Upload</a>
+        <a href="/moms">Past MoMs</a>
+      </nav>
+    </header>
+
+    <div class="card">
+      <div class="actions">
+        <span><strong>File:</strong> {{ filename }}</span>
+        <span style="margin-left: 20px;"><a href="{{ url_for('upload.download_mom', filename=filename) }}">Download</a></span>
+      </div>
+      <pre>{{ content }}</pre>
+    </div>
+
+    <div class="card">
+      <h2>Share via Email</h2>
+      <form method="POST">
+        <div class="form-field">
+          <label>Email Addresses (comma-separated)</label>
+          <textarea name="emails" placeholder="email1@example.com, email2@example.com"></textarea>
+        </div>
+        <button type="submit">Send MoM</button>
+      </form>
+      {% if error %}
+        <div class="message error">{{ error }}</div>
+      {% endif %}
+      {% if success %}
+        <div class="message success">{{ success }}</div>
+      {% endif %}
+    </div>
+    </div>
+  </body>
+</html>

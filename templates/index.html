@@ -5,17 +5,103 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AutoMoM - Upload</title>
     <style>
-      body { font-family: Arial, sans-serif; max-width:680px; margin:40px auto; padding:0 16px; }
-      .card { border:1px solid #ddd; padding:18px; border-radius:8px }
-      label { display:block; margin-top:12px }
-      textarea { width:100%; min-height:120px }
-      #result { margin-top:12px; white-space:pre-wrap }
+      :root {
+        --bg: #f4f7fb;
+        --surface: #ffffff;
+        --border: #d8e2ef;
+        --primary: #3b82f6;
+        --primary-dark: #1d4ed8;
+        --accent: #22c55e;
+        --text: #102a43;
+        --muted: #627d98;
+        --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: 'Inter', 'Segoe UI', -apple-system, system-ui, sans-serif;
+        background: linear-gradient(135deg, #edf2ff 0%, #f8fafc 99%);
+        color: var(--text);
+        margin: 0;
+      }
+      .site-wrap { max-width: 860px; margin: 30px auto; padding: 0 16px; }
+      header {
+        background: #ffffff;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+        padding: 16px 20px;
+        margin-bottom: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      h1 { margin: 0; font-size: 1.6rem; }
+      nav a {
+        color: var(--text);
+        text-decoration: none;
+        font-weight: 600;
+        margin-left: 14px;
+        padding: 8px 12px;
+        border-radius: 8px;
+      }
+      nav a:hover { background: #edf2ff; color: var(--primary-dark); }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: var(--shadow);
+      }
+      .form-field { margin-bottom: 16px; }
+      label { display:block; font-weight: 600; margin-bottom: 8px; color: var(--muted); }
+      input[type="file"], textarea {
+        width:100%;
+        border:1px solid #cbd5e1;
+        border-radius:8px;
+        padding:10px;
+        font-size:0.98rem;
+        background:#fff;
+      }
+      textarea { min-height: 170px; resize: vertical; }
+      button {
+        background-color: var(--primary);
+        color:white;
+        border:none;
+        border-radius:10px;
+        padding: 12px 18px;
+        font-size: 1rem;
+        font-weight: 700;
+        cursor:pointer;
+        transition: all 0.18s ease;
+      }
+      button:hover { background-color: var(--primary-dark); }
+      #result {
+        margin-top: 14px;
+        border-radius: 8px;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        padding: 12px;
+        white-space: pre-wrap;
+        color: var(--text);
+      }
+      .status { font-weight: 600; }
+      .status--error { color: #dc2626; }
+      .status--success { color: #16a34a; }
     </style>
   </head>
   <body>
-    <h1>Upload audio + gist</h1>
+    <div class="site-wrap">
+    <header>
+      <h1>AutoMoM</h1>
+      <nav>
+        <a href="/">Upload</a>
+        <a href="/moms">Past MoMs</a>
+      </nav>
+    </header>
+
     <div class="card">
       <form id="uploadForm">
+
         <label>Audio file
           <input type="file" name="file" id="fileInput" accept="audio/*" required />
         </label>
@@ -29,9 +115,11 @@
 
       <div id="result"></div>
     </div>
+    </div>
 
     <script>
       const form = document.getElementById('uploadForm');
+
       const result = document.getElementById('result');
 
       form.addEventListener('submit', async (e) => {
@@ -45,10 +133,11 @@
             result.textContent = 'Error: ' + (json.error || JSON.stringify(json));
             return;
           }
-          let out = 'Upload complete:\nSaved to: ' + json.saved_to;
-          if (json.processed_to) out += '\nProcessed to: ' + json.processed_to;
-          if (json.gist_saved_to) out += '\nGist saved to: ' + json.gist_saved_to;
-          result.textContent = out;
+          if (json.redirect) {
+            window.location.href = json.redirect;
+          } else {
+            result.textContent = 'Upload complete, but no redirect provided.';
+          }
         } catch (err) {
           result.textContent = 'Request failed: ' + err;
         }

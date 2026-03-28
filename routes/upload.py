@@ -1,8 +1,11 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, render_template, abort, send_from_directory, redirect, url_for
 from pathlib import Path
+from pipelines.llm_inference import run_llm_on_transcript
 from pipelines.preprocess import preprocess_audio
-from config import DATA_DIR, UPLOADS_DIR, PROCESSED_DIR, GISTS_DIR
+from config import DATA_DIR, UPLOADS_DIR, PROCESSED_DIR, GISTS_DIR, SMTP_USER, SMTP_PASSWORD, SMTP_SERVER, SMTP_PORT
 from pipelines.stt import transcribe, load_whisper
+import yagmail
+import os
 
 upload_bp = Blueprint("upload", __name__)
 
@@ -57,6 +60,7 @@ def upload():
         transcript_file = transcripts_dir / (base_name + ".txt")
         transcript_file.write_text(transcript, encoding="utf-8")
         transcript_saved_to = str(transcript_file)
+        output_file = run_llm_on_transcript(transcript_file)
     except Exception as e:
         print(f"Transcription failed: {str(e)}")
         return jsonify({"error": f"transcription failed: {str(e)}"}), 500
@@ -69,7 +73,85 @@ def upload():
         gist_saved_to = str(gist_file)
 
     return jsonify({
-        "saved_to": str(save_path),
-        "processed_to": processed_saved_to,
-        "gist_saved_to": gist_saved_to
+        "redirect": url_for('upload.list_moms', highlight=os.path.basename(str(output_file)))
     })
+
+
+@upload_bp.route("/moms", methods=["GET", "POST"])
+def list_moms():
+    mom_dir = Path("data/mom_output")
+    mom_dir.mkdir(parents=True, exist_ok=True)
+    mom_files = sorted([p.name for p in mom_dir.glob("*_mom.md") if p.is_file()])
+    # fallback to text files for existing older MOMs
+    if not mom_files:
+        mom_files = sorted([p.name for p in mom_dir.glob("*_mom.txt") if p.is_file()])
+
+    highlight = request.args.get('highlight')
+    error = None
+    success = None
+
+    if request.method == "POST":
+        filename = request.form.get("filename")
+        emails = request.form.get("emails", "").strip()
+
+        if not filename or not emails:
+            error = "Please provide both filename and email addresses."
+        else:
+            email_list = [e.strip() for e in emails.split(",") if e.strip()]
+            if not email_list:
+                error = "No valid email addresses found."
+            else:
+                # Ensure we send the markdown file when available
+                file_path = mom_dir / filename
+                if file_path.suffix == ".txt":
+                    md_candidate = file_path.with_suffix('.md')
+                    if md_candidate.exists():
+                        file_path = md_candidate
+                        filename = md_candidate.name
+
+                if not file_path.exists():
+                    error = "File not found."
+                else:
+                    content = file_path.read_text(encoding="utf-8")
+                    try:
+                        yag = yagmail.SMTP(
+                            SMTP_USER,
+                            SMTP_PASSWORD,
+                            host=SMTP_SERVER,
+                            port=SMTP_PORT,
+                            smtp_starttls=True,
+                            smtp_ssl=False
+                        )
+                        subject = f"Minutes of Meeting: {filename}"
+                        body = f"Attached is the Minutes of Meeting generated from the audio.\n\n{content[:500]}..."  # Truncate for body
+                        yag.send(to=email_list, subject=subject, contents=body, attachments=str(file_path))
+                        success = f"MoM '{filename}' shared successfully!"
+                    except Exception as e:
+                        error = f"Failed to send email: {str(e)}"
+
+    return render_template("moms.html", mom_files=mom_files, highlight=highlight, error=error, success=success)
+
+
+@upload_bp.route("/mom/<path:filename>", methods=["GET"])
+def show_mom(filename):
+    mom_dir = Path("data/mom_output").resolve()
+    file_path = (mom_dir / filename).resolve()
+
+    # Prefer Markdown output file
+    if file_path.suffix == ".txt":
+        md_file = file_path.with_suffix('.md')
+        if md_file.exists():
+            file_path = md_file
+            filename = md_file.name
+
+    if not file_path.exists() or not file_path.is_file() or mom_dir not in file_path.parents:
+        abort(404)
+
+    content = file_path.read_text(encoding="utf-8")
+    return render_template("mom_detail.html", filename=filename, content=content)
+
+@upload_bp.route("/mom/<path:filename>/download", methods=["GET"])
+def download_mom(filename):
+    mom_dir = Path("data/mom_output")
+    return send_from_directory(str(mom_dir), filename, as_attachment=True)
+
