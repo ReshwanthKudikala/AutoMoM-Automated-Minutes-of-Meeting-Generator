@@ -62,7 +62,7 @@ def upload():
         transcript_saved_to = str(transcript_file)
         output_file = run_llm_on_transcript(transcript_file)
     except Exception as e:
-        print(f"Transcription failed: {str(e)}")
+        print(f"Transcription failed: {str(e)}")        
         return jsonify({"error": f"transcription failed: {str(e)}"}), 500
     print(f"Transcript saved to: {transcript_saved_to}")
     gist_saved_to = None
