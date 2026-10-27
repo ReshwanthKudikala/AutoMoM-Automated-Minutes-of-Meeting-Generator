@@ -120,9 +120,9 @@ The paper’s optimized configuration (C4) runs WhisperX on GPU:0 and pyannote d
 ```
 .
 ├── main.py                 # Flask app factory and entrypoint
-├── config.py               # Paths, FFmpeg location, SMTP settings
+├── config.py               # Paths, upload limits, FLASK_DEBUG, SMTP settings
 ├── cudaCheck.py            # Quick CUDA / GPU availability check
-├── requirements.txt        # Python dependencies
+├── requirements.txt        # Python dependencies (includes pytest)
 ├── pipelines/
 │   ├── preprocess.py       # FFmpeg audio preprocessing
 │   ├── stt.py              # Whisper transcription
@@ -130,14 +130,21 @@ The paper’s optimized configuration (C4) runs WhisperX on GPU:0 and pyannote d
 │   └── llm_inference.py    # NVIDIA LLaMA MoM generation
 ├── routes/
 │   └── upload.py           # Upload, MoM list/detail/download, email share
+├── scripts/
+│   ├── manual_llm_smoke.py           # Optional real NVIDIA integration check
+│   └── manual_diarization_smoke.py   # Optional real pyannote integration check
 ├── templates/
 │   ├── index.html          # Upload UI
 │   ├── moms.html           # MoM list and share forms
 │   ├── mom_detail.html     # Rendered Markdown MoM
 │   └── share.html          # Share page template (legacy / unused by current routes)
 └── tests/
-    ├── test_diarization.py # Manual diarization smoke script
-    └── test_llm.py         # Manual LLM smoke script
+    ├── conftest.py                  # Shared fixtures / dependency stubs
+    ├── test_upload_security.py      # Upload + MoM path confinement tests
+    ├── test_max_content_length.py   # MAX_CONTENT_LENGTH parsing tests
+    ├── test_flask_debug.py          # FLASK_DEBUG parsing tests
+    ├── test_llm.py                  # Mocked LLM helper unit tests
+    └── test_diarization.py          # Mocked diarization unit tests
 ```
 
 Runtime data directories are created by `config.py` (and related code) under `data/` (`uploads/`, `processed/`, `gists/`, `transcript/`, `mom_output/`). The `data/` and `tools/` directories are gitignored.
@@ -199,6 +206,13 @@ Create a `.env` file in the repository root (the file is gitignored). `pipelines
 # Required for MoM generation (NVIDIA Integrate / NIM-compatible API)
 nvidia_token=YOUR_NVIDIA_API_KEY
 
+# Optional: Flask debug (disabled by default)
+# FLASK_DEBUG=0
+# Truthy: 1, true, yes, on  |  Falsy: 0, false, no, off  (case-insensitive)
+
+# Optional: max upload size in bytes (default: 52428800 = 50 MiB)
+# MAX_CONTENT_LENGTH=52428800
+
 # Optional: email sharing (routes/upload.py via config.py)
 SMTP_USER=your.email@example.com
 SMTP_PASSWORD=YOUR_APP_PASSWORD_OR_SMTP_SECRET
@@ -209,6 +223,8 @@ SMTP_PORT=587
 | Variable / setting | Where used | Purpose |
 |---|---|---|
 | `nvidia_token` | `pipelines/llm_inference.py` | Auth for `https://integrate.api.nvidia.com/v1` |
+| `FLASK_DEBUG` | `config.py`, `main.py` | Enables Flask debug mode when truthy; **defaults to disabled** |
+| `MAX_CONTENT_LENGTH` | `config.py`, `main.py` | Max request body size in bytes (default 50 MiB); invalid values fall back to the default |
 | `SMTP_USER` | `config.py` | SMTP username |
 | `SMTP_PASSWORD` | `config.py` | SMTP password / app password |
 | `SMTP_SERVER` | `config.py` | Default `smtp.gmail.com` |
@@ -225,7 +241,17 @@ Never commit real credentials. Prefer app passwords or secrets managers for SMTP
 python main.py
 ```
 
-This starts Flask with `debug=True` (default host/port: `http://127.0.0.1:5000/`).
+This starts Flask with **debug mode disabled by default** (default host/port: `http://127.0.0.1:5000/`). Importing `create_app()` does not start the development server.
+
+To enable the debugger and reloader explicitly:
+
+```bash
+# Windows PowerShell
+$env:FLASK_DEBUG="1"; python main.py
+
+# macOS / Linux
+FLASK_DEBUG=1 python main.py
+```
 
 ### Endpoints (from `main.py` and `routes/upload.py`)
 
@@ -312,19 +338,20 @@ WER was invariant across configurations. Summarization metrics in the paper use 
 
 ## 14. Testing
 
-The `tests/` directory contains **manual smoke scripts**, not a formal pytest suite.
+Automated tests use **pytest** (mocked; no NVIDIA API, model downloads, or GPU required):
 
 ```bash
-# From the repository root, after configuring nvidia_token and placing a transcript:
-python tests/test_llm.py
-# Expects: data/transcript/EarningsCall.txt
-
-# Diarization smoke script (paths are relative to the tests/ folder in the script):
-python tests/test_diarization.py
-# Expects audio at ../data/outputs/clean.wav relative to the script
+python -m pytest -v
 ```
 
-No automated CI results or pass/fail claims are documented in this repository.
+Manual integration smoke checks (require local credentials/files and are **not** collected by pytest):
+
+```bash
+python scripts/manual_llm_smoke.py [path/to/transcript.txt]
+python scripts/manual_diarization_smoke.py [path/to/audio.wav]
+```
+
+No CI pass/fail status is claimed in this README.
 
 ---
 
@@ -338,7 +365,7 @@ Supported by the current code and/or the paper:
 - **FFmpeg path** in `config.py` is Windows-oriented by default.
 - **External services required:** NVIDIA API (and SMTP for sharing); inference may incur usage costs.
 - **pyannote** typically needs Hugging Face model access and sufficient VRAM; not exercised by the main app path.
-- **Debug mode:** `main.py` runs Flask with `debug=True`—not intended as a hardened production deployment.
+- **Debug mode:** Disabled by default. Set `FLASK_DEBUG` to a truthy value (`1` / `true` / `yes` / `on`) only when you intentionally need the development debugger; do not enable it on shared or production hosts.
 - **Paper evaluation caveats:** ROUGE/BLEU use pseudo-references from C4; single-GPU parallel STT+diarization was reported as ineffective due to GPU SM saturation.
 - **No end-to-end evaluation harness** for AMI WER/ROUGE/BLEU is present in this repository snapshot.
 
@@ -351,7 +378,7 @@ Supported by the current code and/or the paper:
 - Wire pyannote diarization and speaker-aligned transcripts into the upload pipeline
 - Inject the optional meeting gist into the LLM prompt (as described in the paper)
 - Align the application STT stack with WhisperX and optional dual-GPU scheduling
-- Add a proper automated test suite (unit + integration) and CI
+- Expand automated coverage (integration/e2e) and add CI
 - Real-time / streaming transcription and incremental summarization (paper future work)
 - Stronger robustness to overlapping speech and noisy audio (paper future work)
 - Human-in-the-loop correction workflows (paper future work)
