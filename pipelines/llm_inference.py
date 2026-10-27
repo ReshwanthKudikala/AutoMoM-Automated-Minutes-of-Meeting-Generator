@@ -1,9 +1,16 @@
+import logging
 import os
+import uuid
 from pathlib import Path
-from openai import OpenAI
+
 from dotenv import load_dotenv
+from openai import OpenAI
+
+from config import MOM_OUTPUT_DIR
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
 # --------------------------------------------------
 # NVIDIA OpenAI-compatible client
 # --------------------------------------------------
@@ -88,23 +95,82 @@ def generate_mom_for_transcript(transcript_text: str):
     return full_output.strip()
 
 
+def mom_output_path(output_stem: str, output_dir: Path | None = None) -> Path:
+    """Final MoM path: ``<stem>_mom.md`` under the MoM output directory."""
+    directory = output_dir if output_dir is not None else MOM_OUTPUT_DIR
+    return directory / f"{output_stem}_mom.md"
+
+
+def mom_temp_path(
+    output_stem: str,
+    request_id: str,
+    output_dir: Path | None = None,
+) -> Path:
+    """
+    Request-owned MoM temp path: ``<stem>_<request_id>_mom.md.tmp``.
+
+    Distinct from the final ``<stem>_mom.md`` so concurrent uploads sharing a
+    stem cannot clobber each other's incomplete writes.
+    """
+    directory = output_dir if output_dir is not None else MOM_OUTPUT_DIR
+    return directory / f"{output_stem}_{request_id}_mom.md.tmp"
+
+
 # --------------------------------------------------
 # PIPELINE ENTRYPOINT
 # --------------------------------------------------
-def run_llm_on_transcript(transcript_path: Path):
+def run_llm_on_transcript(
+    transcript_path: Path,
+    *,
+    output_stem: str | None = None,
+    request_id: str | None = None,
+    output_file: Path | None = None,
+    temp_file: Path | None = None,
+):
+    """
+    Generate a MoM from a transcript file and write it atomically.
+
+    ``output_stem`` controls the final filename (``<stem>_mom.md``). When the
+    transcript path includes a per-request id, callers must pass the original
+    upload stem so the public MoM name stays stable.
+
+    ``request_id`` (or an explicit ``temp_file``) makes the intermediate
+    ``.tmp`` unique to this invocation so concurrent writers do not share it.
+    """
 
     transcript_text = transcript_path.read_text(encoding="utf-8")
 
-    print("Calling NVIDIA LLaMA...")
+    logger.info("Calling NVIDIA LLaMA for MoM generation (%s)", transcript_path.name)
 
     mom_output = generate_mom_for_transcript(transcript_text)
+    # Reject empty / whitespace-only without rewriting legitimate Markdown.
+    if mom_output is None or not str(mom_output).strip():
+        raise ValueError("LLM returned empty MoM output")
 
-    output_dir = Path("data/mom_output")
+    output_dir = MOM_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_file = output_dir / (transcript_path.stem + "_mom.md")
-    output_file.write_text(mom_output, encoding="utf-8")
+    stem = output_stem if output_stem is not None else transcript_path.stem
+    rid = request_id if request_id is not None else uuid.uuid4().hex
 
-    print("MoM saved to:", output_file)
+    if output_file is None:
+        output_file = mom_output_path(stem, output_dir)
+    if temp_file is None:
+        temp_file = mom_temp_path(stem, rid, output_dir)
 
+    try:
+        temp_file.write_text(mom_output, encoding="utf-8")
+        temp_file.replace(output_file)
+    except Exception:
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except OSError:
+                logger.warning(
+                    "Failed to remove incomplete MoM temp file %s",
+                    temp_file.name,
+                )
+        raise
+
+    logger.info("MoM saved to %s", output_file.name)
     return output_file

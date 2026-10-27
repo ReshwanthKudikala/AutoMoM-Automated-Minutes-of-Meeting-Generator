@@ -1,5 +1,6 @@
 import logging
 import os
+import uuid
 from pathlib import Path
 
 import yagmail
@@ -26,7 +27,7 @@ from config import (
     SMTP_USER,
     UPLOADS_DIR,
 )
-from pipelines.llm_inference import run_llm_on_transcript
+from pipelines.llm_inference import mom_temp_path, run_llm_on_transcript
 from pipelines.preprocess import preprocess_audio
 from pipelines.stt import load_whisper, transcribe
 
@@ -37,6 +38,71 @@ upload_bp = Blueprint("upload", __name__)
 
 def _is_allowed_audio_filename(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_AUDIO_EXTENSIONS
+
+
+def _new_request_id() -> str:
+    return uuid.uuid4().hex
+
+
+def request_upload_path(
+    safe_name: str,
+    request_id: str,
+    uploads_dir: Path | None = None,
+) -> Path:
+    """
+    Per-request uploaded source path: ``{stem}_{request_id}{suffix}``.
+
+    Keeps the original extension for FFmpeg while isolating concurrent uploads
+    that share the same sanitized filename.
+    """
+    directory = uploads_dir if uploads_dir is not None else UPLOADS_DIR
+    original = Path(safe_name)
+    return directory / f"{original.stem}_{request_id}{original.suffix}"
+
+
+def request_gist_path(
+    base_name: str,
+    request_id: str,
+    gists_dir: Path | None = None,
+) -> Path:
+    """Per-request gist path: ``{stem}_{request_id}.gist.txt``."""
+    directory = gists_dir if gists_dir is not None else GISTS_DIR
+    return directory / f"{base_name}_{request_id}.gist.txt"
+
+
+def request_processed_path(
+    base_name: str,
+    request_id: str,
+    processed_dir: Path | None = None,
+) -> Path:
+    """Per-request processed WAV path (never shared across uploads)."""
+    directory = processed_dir if processed_dir is not None else PROCESSED_DIR
+    return directory / f"{base_name}_{request_id}_processed.wav"
+
+
+def request_transcript_path(
+    base_name: str,
+    request_id: str,
+    transcripts_dir: Path | None = None,
+) -> Path:
+    """Per-request transcript path (never shared across uploads)."""
+    directory = (
+        transcripts_dir
+        if transcripts_dir is not None
+        else (DATA_DIR / "transcript")
+    )
+    return directory / f"{base_name}_{request_id}.txt"
+
+
+def _remove_file_if_exists(path: Path | None) -> None:
+    """Best-effort removal of a single temporary artifact (never raises)."""
+    if path is None:
+        return
+    try:
+        if path.is_file():
+            path.unlink()
+    except OSError:
+        logger.warning("Failed to remove temporary artifact %s", path.name)
 
 
 def resolve_mom_file(filename: str):
@@ -112,26 +178,47 @@ def upload():
 
     uploads_root = UPLOADS_DIR.resolve()
     uploads_root.mkdir(parents=True, exist_ok=True)
-    save_path = (uploads_root / safe_name).resolve()
+
+    # Original sanitized stem drives final MoM naming; request id isolates storage.
+    request_id = _new_request_id()
+    base_name = Path(safe_name).stem
+    save_path = request_upload_path(safe_name, request_id, uploads_root).resolve()
     if save_path.parent != uploads_root:
-        logger.warning("Rejected upload path outside uploads directory: %s", safe_name)
+        logger.warning(
+            "Rejected upload path outside uploads directory: %s (request %s)",
+            safe_name,
+            request_id,
+        )
         return jsonify({"error": "Invalid filename."}), 400
 
     file.save(save_path)
 
     processed_dir = PROCESSED_DIR
     processed_dir.mkdir(parents=True, exist_ok=True)
-    base_name = save_path.stem
-    processed_path = processed_dir / (base_name + "_processed.wav")
+    processed_path = request_processed_path(base_name, request_id, processed_dir)
 
+    transcripts_dir = DATA_DIR / "transcript"
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+    transcript_file = request_transcript_path(base_name, request_id, transcripts_dir)
+
+    mom_tmp = mom_temp_path(base_name, request_id, MOM_OUTPUT_DIR)
+    gist_file = request_gist_path(base_name, request_id, GISTS_DIR)
+
+    # --- Stage: preprocessing ---
     try:
+        # Always use the request-owned save_path; never rebuild from safe_name alone.
         preprocess_audio(str(save_path), str(processed_path))
-        processed_saved_to = str(processed_path)
     except Exception:
-        logger.exception("Audio preprocessing failed for upload %s", safe_name)
+        logger.exception(
+            "Audio preprocessing failed for upload %s (request %s)",
+            safe_name,
+            request_id,
+        )
+        _remove_file_if_exists(processed_path)
         return jsonify({"error": "Audio preprocessing failed."}), 500
-    logger.info("Preprocessed audio saved to: %s", processed_saved_to)
+    logger.info("Preprocessed audio ready for %s (request %s)", safe_name, request_id)
 
+    # --- Stage: speech-to-text (model only) ---
     try:
         load_whisper()
         segments = transcribe(str(processed_path))
@@ -141,24 +228,54 @@ def upload():
             end = f"{s.get('end', 0.0):.2f}"
             text = s.get("text", "").strip()
             lines.append(f"[{start} - {end}] {text}")
-
         transcript = "\n".join(lines)
-
-        transcripts_dir = DATA_DIR / "transcript"
-        transcripts_dir.mkdir(parents=True, exist_ok=True)
-        transcript_file = transcripts_dir / (base_name + ".txt")
-        transcript_file.write_text(transcript, encoding="utf-8")
-        transcript_saved_to = str(transcript_file)
-        output_file = run_llm_on_transcript(transcript_file)
     except Exception:
-        logger.exception("Transcription or MoM generation failed for %s", safe_name)
-        return jsonify({"error": "Transcription or MoM generation failed."}), 500
-    logger.info("Transcript saved to: %s", transcript_saved_to)
+        logger.exception(
+            "Speech-to-text failed for upload %s (request %s)",
+            safe_name,
+            request_id,
+        )
+        _remove_file_if_exists(processed_path)
+        return jsonify({"error": "Speech-to-text transcription failed."}), 500
+
+    # --- Stage: persist transcript ---
+    try:
+        transcript_file.write_text(transcript, encoding="utf-8")
+    except Exception:
+        logger.exception(
+            "Failed to save transcript for upload %s (request %s)",
+            safe_name,
+            request_id,
+        )
+        _remove_file_if_exists(processed_path)
+        _remove_file_if_exists(transcript_file)
+        return jsonify({"error": "Failed to save transcript."}), 500
+    logger.info("Transcript saved for %s (request %s)", safe_name, request_id)
+
+    # --- Stage: LLM MoM generation ---
+    try:
+        output_file = run_llm_on_transcript(
+            transcript_file,
+            output_stem=base_name,
+            request_id=request_id,
+            temp_file=mom_tmp,
+        )
+    except Exception:
+        logger.exception(
+            "MoM generation failed for upload %s (request %s)",
+            safe_name,
+            request_id,
+        )
+        _remove_file_if_exists(processed_path)
+        # Only this request's MoM temp; never a finished MoM or another request's tmp.
+        _remove_file_if_exists(mom_tmp)
+        return jsonify({"error": "Minutes of Meeting generation failed."}), 500
+
+    # Intermediate processed audio is no longer needed after a successful run.
+    _remove_file_if_exists(processed_path)
 
     if gist_text:
-        gist_dir = GISTS_DIR
-        gist_dir.mkdir(parents=True, exist_ok=True)
-        gist_file = gist_dir / (safe_name + ".gist.txt")
+        GISTS_DIR.mkdir(parents=True, exist_ok=True)
         gist_file.write_text(gist_text, encoding="utf-8")
 
     return jsonify({
@@ -219,8 +336,14 @@ def list_moms():
                         )
                         success = f"MoM '{file_path.name}' shared successfully!"
                     except Exception:
-                        logger.exception("Failed to send MoM email for %s", file_path.name)
-                        error = "Failed to send email."
+                        logger.exception(
+                            "Email delivery failed for MoM %s",
+                            file_path.name,
+                        )
+                        error = (
+                            "Email delivery failed. "
+                            "The Minutes of Meeting file was not changed."
+                        )
 
     return render_template(
         "moms.html",

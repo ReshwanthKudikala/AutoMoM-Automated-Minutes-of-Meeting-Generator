@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -44,8 +45,12 @@ def test_valid_upload_sanitizes_filename_and_processes(
 
     saved = list(app.test_paths["uploads"].iterdir())
     assert len(saved) == 1
-    assert saved[0].name == "My_Meeting_Audio.wav"
+    assert saved[0].name.startswith("My_Meeting_Audio_")
+    assert saved[0].suffix == ".wav"
     mock_preprocess.assert_called_once()
+    preprocess_src = Path(mock_preprocess.call_args.args[0])
+    assert preprocess_src.resolve() == saved[0].resolve()
+    assert preprocess_src.name != "My_Meeting_Audio.wav"
     mock_transcribe.assert_called_once()
     mock_llm.assert_called_once()
 
@@ -100,7 +105,8 @@ def test_upload_traversal_filename_is_confined(client, app):
     assert response.status_code == 200
     saved = list(app.test_paths["uploads"].iterdir())
     assert len(saved) == 1
-    assert saved[0].name == "evil.wav"
+    assert saved[0].name.startswith("evil_")
+    assert saved[0].suffix == ".wav"
     assert saved[0].resolve().parent == app.test_paths["uploads"].resolve()
     # Must not create a file outside the uploads directory.
     assert not (app.test_paths["data_dir"].parent / "evil.wav").exists()
@@ -261,41 +267,63 @@ def test_resolve_mom_file_rejects_windows_drive_letter_path(app):
     assert b"File not found." in response.data
 
 
-def test_symlink_inside_mom_dir_pointing_outside_is_rejected(app):
-    """Symlink escape: link in MOM_OUTPUT_DIR must not expose outside content."""
+def test_symlink_inside_mom_dir_pointing_outside_is_rejected(app, monkeypatch):
+    """
+    Symlink escape: a name under MOM_OUTPUT_DIR that resolves outside must not
+    expose outside content via view, download, or email.
+
+    Prefer a real filesystem symlink when the OS allows it (Linux CI, Windows
+    with Developer Mode / elevated privilege). On unprivileged Windows,
+    ``Path.symlink_to`` fails with WinError 1314; in that case emulate the
+    same ``Path.resolve()`` follow-to-outside behavior so the confinement
+    check in ``resolve_mom_file`` (resolve + relative_to) is still exercised
+    without weakening assertions.
+    """
     from routes.upload import resolve_mom_file
 
     outside = app.test_paths["data_dir"] / "symlink_target_secret.md"
     outside.write_text("SECRET_SYMLINK", encoding="utf-8")
     link = app.test_paths["mom_output"] / "linked_escape_mom.md"
+    outside_resolved = outside.resolve()
+
+    used_real_symlink = False
+    try:
+        link.symlink_to(outside_resolved)
+        used_real_symlink = True
+    except OSError:
+        # Emulate symlink resolution: candidate name resolves to the outside file.
+        real_resolve = Path.resolve
+
+        def resolve_emulating_symlink_escape(self, *args, **kwargs):
+            if self.name == "linked_escape_mom.md":
+                return outside_resolved
+            return real_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_emulating_symlink_escape)
 
     try:
-        link.symlink_to(outside.resolve())
-    except OSError as exc:
-        pytest.skip(
-            "Cannot create symlink required for this test "
-            f"(OS or permissions limitation): {exc}"
-        )
+        assert resolve_mom_file("linked_escape_mom.md") is None
 
-    assert resolve_mom_file("linked_escape_mom.md") is None
+        client = app.test_client()
+        view = client.get("/mom/linked_escape_mom.md")
+        assert view.status_code == 404
+        assert b"SECRET_SYMLINK" not in view.data
 
-    client = app.test_client()
-    view = client.get("/mom/linked_escape_mom.md")
-    assert view.status_code == 404
-    assert b"SECRET_SYMLINK" not in view.data
+        download = client.get("/mom/linked_escape_mom.md/download")
+        assert download.status_code == 404
+        assert b"SECRET_SYMLINK" not in download.data
 
-    download = client.get("/mom/linked_escape_mom.md/download")
-    assert download.status_code == 404
-    assert b"SECRET_SYMLINK" not in download.data
-
-    with patch("routes.upload.yagmail.SMTP") as mock_smtp_cls:
-        email_resp = client.post(
-            "/moms",
-            data={
-                "filename": "linked_escape_mom.md",
-                "emails": "a@example.com",
-            },
-        )
-        assert email_resp.status_code == 200
-        assert b"File not found." in email_resp.data
-        mock_smtp_cls.assert_not_called()
+        with patch("routes.upload.yagmail.SMTP") as mock_smtp_cls:
+            email_resp = client.post(
+                "/moms",
+                data={
+                    "filename": "linked_escape_mom.md",
+                    "emails": "a@example.com",
+                },
+            )
+            assert email_resp.status_code == 200
+            assert b"File not found." in email_resp.data
+            mock_smtp_cls.assert_not_called()
+    finally:
+        if used_real_symlink:
+            link.unlink(missing_ok=True)
