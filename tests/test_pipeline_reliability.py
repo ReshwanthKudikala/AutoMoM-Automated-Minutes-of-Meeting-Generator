@@ -546,6 +546,94 @@ def test_gist_paths_are_request_specific_and_isolated(client, app):
     assert not (app.test_paths["gists"] / "meeting.gist.txt").exists()
 
 
+def test_upload_passes_request_specific_gist_to_llm_and_omits_empty(client, app):
+    """Each upload's form gist reaches run_llm as meeting_context; empty stays None."""
+    ids = iter([REQUEST_A, REQUEST_B, "cccccccccccccccccccccccccccccccc"])
+    seen_contexts: list[str | None] = []
+
+    def fake_preprocess(_inp, outp):
+        Path(outp).write_bytes(b"wav")
+
+    def fake_llm(transcript_path: Path, **kwargs):
+        seen_contexts.append(kwargs.get("meeting_context"))
+        mom = app.test_paths["mom_output"] / "meeting_mom.md"
+        mom.write_text("# Meeting\n", encoding="utf-8")
+        return mom
+
+    with patch(
+        "routes.upload._new_request_id", side_effect=lambda: next(ids)
+    ), patch(
+        "routes.upload.preprocess_audio", side_effect=fake_preprocess
+    ), patch("routes.upload.load_whisper"), patch(
+        "routes.upload.transcribe",
+        return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
+    ), patch("routes.upload.run_llm_on_transcript", side_effect=fake_llm):
+        r1 = client.post(
+            "/upload",
+            data={**_audio_file(), "gist": "context-for-A"},
+            content_type="multipart/form-data",
+        )
+        r2 = client.post(
+            "/upload",
+            data={**_audio_file(), "gist": "context-for-B"},
+            content_type="multipart/form-data",
+        )
+        r3 = client.post(
+            "/upload",
+            data={**_audio_file(), "gist": "   \n\t  "},
+            content_type="multipart/form-data",
+        )
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r3.status_code == 200
+    assert seen_contexts == ["context-for-A", "context-for-B", None]
+    # Request-A gist file must not contain B's notes (isolation of stored gists).
+    a_gist = request_gist_path("meeting", REQUEST_A, app.test_paths["gists"])
+    b_gist = request_gist_path("meeting", REQUEST_B, app.test_paths["gists"])
+    assert a_gist.read_text(encoding="utf-8") == "context-for-A"
+    assert b_gist.read_text(encoding="utf-8") == "context-for-B"
+    assert a_gist.read_text(encoding="utf-8") != b_gist.read_text(encoding="utf-8")
+    # Whitespace-only gist must not create a gist file for request C.
+    c_gist = request_gist_path(
+        "meeting", "cccccccccccccccccccccccccccccccc", app.test_paths["gists"]
+    )
+    assert not c_gist.exists()
+
+
+def test_whitespace_only_gist_not_persisted_and_not_sent_to_llm(client, app):
+    seen = {}
+
+    def fake_preprocess(_inp, outp):
+        Path(outp).write_bytes(b"wav")
+
+    def fake_llm(transcript_path: Path, **kwargs):
+        seen["meeting_context"] = kwargs.get("meeting_context")
+        mom = app.test_paths["mom_output"] / "meeting_mom.md"
+        mom.write_text("# Meeting\n", encoding="utf-8")
+        return mom
+
+    with patch(
+        "routes.upload._new_request_id", return_value=REQUEST_A
+    ), patch(
+        "routes.upload.preprocess_audio", side_effect=fake_preprocess
+    ), patch("routes.upload.load_whisper"), patch(
+        "routes.upload.transcribe",
+        return_value=[{"start": 0.0, "end": 1.0, "text": "hello"}],
+    ), patch("routes.upload.run_llm_on_transcript", side_effect=fake_llm):
+        response = client.post(
+            "/upload",
+            data={**_audio_file(), "gist": " \n\t  "},
+            content_type="multipart/form-data",
+        )
+
+    assert response.status_code == 200
+    assert seen["meeting_context"] is None
+    gist_path = request_gist_path("meeting", REQUEST_A, app.test_paths["gists"])
+    assert not gist_path.exists()
+    assert list(app.test_paths["gists"].glob("*.gist.txt")) == []
+
+
 @patch("routes.upload.yagmail.SMTP")
 def test_email_delivery_failure_does_not_look_like_pipeline_failure(
     mock_smtp_cls, client, app

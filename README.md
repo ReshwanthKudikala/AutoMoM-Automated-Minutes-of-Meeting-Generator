@@ -60,18 +60,18 @@ Manual MoM writing is slow, inconsistent, and error-prone—especially for long,
 - **Audio preprocessing** via FFmpeg (mono, 16 kHz, loudness normalization)
 - **Speech-to-text** using OpenAI Whisper (`pipelines/stt.py`, default model: `base`)
 - **MoM generation** via NVIDIA’s OpenAI-compatible API (`meta/llama-3.1-8b-instruct`)
-- **Structured Markdown MoM** sections: Attendees, Agenda Summary, Key Discussions, Decisions Made, Action Items, Next Steps
+- **Structured Markdown MoM** sections: Attendees, Meeting Summary, Key Discussions, Decisions Made, Action Items (owner/deadline when stated), Open Questions, Next Steps
 - **MoM library** listing, Markdown rendering, and file download
 - **Email sharing** of MoM files via SMTP / yagmail
 - **Health check** endpoint (`GET /health`)
-- **Speaker diarization module** (`pipelines/diarization.py`) using `pyannote/speaker-diarization` — present in the codebase but **not** invoked by the upload route
+- **Optional speaker diarization** (`pipelines/diarization.py`) using `pyannote/speaker-diarization` — off by default; enable with `ENABLE_DIARIZATION=1` (requires Hugging Face gated-model access / token; failures fall back to unlabeled transcripts)
 
 ### Described in the research paper (not fully mirrored by the current web pipeline)
 
 - WhisperX-based transcription (paper); the app uses the `whisper` package
 - Parallel STT + diarization across two GPUs (C3/C4 configurations)
 - Speaker-labeled transcript alignment before summarization
-- Meeting gist injected into the LLM prompt for context-aware summarization (the UI stores gist text under `data/gists/`, but the LLM prompt in `pipelines/llm_inference.py` currently uses the transcript only)
+- Optional meeting gist injected into the LLM prompt as untrusted meeting context (UI form field; also persisted under `data/gists/` after a successful run)
 - AMI Meeting Corpus evaluation with WER, ROUGE, BLEU, and RTF
 
 ---
@@ -107,7 +107,7 @@ The paper’s optimized configuration (C4) runs WhisperX on GPU:0 and pyannote d
 | **Backend / UI** | Flask, Jinja2 HTML templates | Not the evaluation focus |
 | **Audio preprocessing** | FFmpeg (`ffmpeg-python` / local binary) | Audio preparation for AMI experiments |
 | **Transcription** | OpenAI Whisper (`whisper` package) | WhisperX |
-| **Diarization** | `pyannote.audio` module present; unused in upload flow | pyannote on a dedicated GPU |
+| **Diarization** | Optional in upload (`ENABLE_DIARIZATION=1`); pyannote loaded lazily when enabled | pyannote on a dedicated GPU |
 | **Summarization** | LLaMA 3.1-8B Instruct via NVIDIA Integrate API | LLaMA 3.1-8B via NVIDIA NIM |
 | **GPU / ML** | PyTorch, CUDA when available | Dual NVIDIA Tesla T4 (Kaggle) |
 | **Email** | yagmail + SMTP | — |
@@ -126,7 +126,7 @@ The paper’s optimized configuration (C4) runs WhisperX on GPU:0 and pyannote d
 ├── pipelines/
 │   ├── preprocess.py       # FFmpeg audio preprocessing
 │   ├── stt.py              # Whisper transcription
-│   ├── diarization.py      # pyannote speaker diarization (standalone)
+│   ├── diarization.py      # pyannote diarization + transcript alignment (opt-in via upload)
 │   └── llm_inference.py    # NVIDIA LLaMA MoM generation
 ├── routes/
 │   └── upload.py           # Upload, MoM list/detail/download, email share
@@ -213,6 +213,15 @@ nvidia_token=YOUR_NVIDIA_API_KEY
 # Optional: max upload size in bytes (default: 52428800 = 50 MiB)
 # MAX_CONTENT_LENGTH=52428800
 
+# Optional: speaker diarization on upload (default: off)
+# ENABLE_DIARIZATION=0
+# When enabled, pyannote/torch load on first use; gated model access typically
+# needs a Hugging Face token (see HF_TOKEN / HUGGING_FACE_HUB_TOKEN below).
+
+# Optional: Hugging Face token for gated pyannote models (diarization only)
+# HF_TOKEN=YOUR_HF_TOKEN
+# HUGGING_FACE_HUB_TOKEN=YOUR_HF_TOKEN
+
 # Optional: email sharing (routes/upload.py via config.py)
 SMTP_USER=your.email@example.com
 SMTP_PASSWORD=YOUR_APP_PASSWORD_OR_SMTP_SECRET
@@ -225,6 +234,9 @@ SMTP_PORT=587
 | `nvidia_token` | `pipelines/llm_inference.py` | Auth for `https://integrate.api.nvidia.com/v1` |
 | `FLASK_DEBUG` | `config.py`, `main.py` | Enables Flask debug mode when truthy; **defaults to disabled** |
 | `MAX_CONTENT_LENGTH` | `config.py`, `main.py` | Max request body size in bytes (default 50 MiB); invalid values fall back to the default |
+| `ENABLE_DIARIZATION` | `config.py`, `routes/upload.py` | Opt-in pyannote speaker diarization on upload; **defaults to disabled**. When on, failures fall back to an unlabeled transcript |
+| `HF_TOKEN` | `pipelines/diarization.py` | Hugging Face token for gated `pyannote/speaker-diarization` (checked first) |
+| `HUGGING_FACE_HUB_TOKEN` | `pipelines/diarization.py` | Alternate HF token name if `HF_TOKEN` is unset |
 | `SMTP_USER` | `config.py` | SMTP username |
 | `SMTP_PASSWORD` | `config.py` | SMTP password / app password |
 | `SMTP_SERVER` | `config.py` | Default `smtp.gmail.com` |
@@ -268,7 +280,7 @@ FLASK_DEBUG=1 python main.py
 
 1. Open `http://127.0.0.1:5000/`
 2. Choose an audio file (`accept="audio/*"`)
-3. Optionally enter gist / notes (saved if provided; not currently fed to the LLM)
+3. Optionally enter gist / notes (fed to the LLM as meeting context; saved under `data/gists/` after a successful run)
 4. Submit upload and wait for redirect to the MoM list
 5. Open, download, or email the generated MoM
 
@@ -281,11 +293,11 @@ As implemented in `routes/upload.py`:
 1. **Receive upload** — audio saved under `data/uploads/`; optional gist under `data/gists/`
 2. **Preprocess** — FFmpeg converts to mono 16 kHz WAV with loudness normalization (`pipelines/preprocess.py`)
 3. **Transcribe** — Whisper (`base` by default) produces timed segments; text is written to `data/transcript/<name>.txt`
-4. **Summarize** — transcript text is sent to `meta/llama-3.1-8b-instruct` with a fixed MoM Markdown prompt (`temperature=0.0`)
-5. **Persist MoM** — Markdown written to `data/mom_output/<name>_mom.md`
+4. **Summarize** — transcript text (plus optional form gist as untrusted meeting context) is sent to `meta/llama-3.1-8b-instruct` with a fixed MoM Markdown prompt (`temperature=0.0`). The prompt requires grounding, no invented owners/dates, decisions vs proposals, and an Open Questions section. Output is validated for required section headers before write.
+5. **Persist MoM** — Markdown written atomically to `data/mom_output/<name>_mom.md`; optional gist written under `data/gists/`
 6. **Present** — client redirected to `/moms` with the new file highlighted
 
-**Not in the upload path today:** pyannote diarization, speaker-label alignment, multi-GPU parallel STT/diarization, or gist injection into the LLM prompt.
+**Optional / not default in the upload path:** pyannote diarization + overlap-based speaker-label alignment (`ENABLE_DIARIZATION=1`). **Not in the upload path:** multi-GPU parallel STT/diarization.
 
 ---
 
@@ -360,11 +372,12 @@ No CI pass/fail status is claimed in this README.
 Supported by the current code and/or the paper:
 
 - **Implementation ≠ paper pipeline:** the web app uses OpenAI Whisper (`base`), not WhisperX, and does not run multi-GPU parallel diarization in the upload flow.
-- **Diarization not integrated** into `POST /upload` even though `pipelines/diarization.py` exists.
-- **Meeting gist is stored but not injected** into the LLM prompt in the current `llm_inference.py` implementation.
+- **Diarization is opt-in** (`ENABLE_DIARIZATION`); labels are anonymous pyannote cluster IDs (for example `SPEAKER_00`), not verified names. Alignment uses maximum time-overlap and is not claimed to be perfect.
+- **Meeting gist and transcript are untrusted user content:** labeled as reference/meeting content only; the model is instructed not to treat embedded text as system instructions. Prompt-injection resistance is best-effort, not a formal guarantee.
+- **MoM quality depends on the model:** structural section validation rejects empty or header-incomplete output, but factual accuracy (no invented owners/dates) is enforced by prompt only and needs real-model evaluation.
 - **FFmpeg path** in `config.py` is Windows-oriented by default.
 - **External services required:** NVIDIA API (and SMTP for sharing); inference may incur usage costs.
-- **pyannote** typically needs Hugging Face model access and sufficient VRAM; not exercised by the main app path.
+- **pyannote** typically needs Hugging Face model access and sufficient VRAM; only loaded when `ENABLE_DIARIZATION` is enabled (lazy import).
 - **Debug mode:** Disabled by default. Set `FLASK_DEBUG` to a truthy value (`1` / `true` / `yes` / `on`) only when you intentionally need the development debugger; do not enable it on shared or production hosts.
 - **Paper evaluation caveats:** ROUGE/BLEU use pseudo-references from C4; single-GPU parallel STT+diarization was reported as ineffective due to GPU SM saturation.
 - **No end-to-end evaluation harness** for AMI WER/ROUGE/BLEU is present in this repository snapshot.
@@ -375,8 +388,7 @@ Supported by the current code and/or the paper:
 
 *Proposed ideas (not implemented unless noted elsewhere in the repo):*
 
-- Wire pyannote diarization and speaker-aligned transcripts into the upload pipeline
-- Inject the optional meeting gist into the LLM prompt (as described in the paper)
+- Improve diarization alignment (e.g. WhisperX word-level timing) and multi-GPU parallel STT/diarization as in the paper
 - Align the application STT stack with WhisperX and optional dual-GPU scheduling
 - Expand automated coverage (integration/e2e) and add CI
 - Real-time / streaming transcription and incremental summarization (paper future work)

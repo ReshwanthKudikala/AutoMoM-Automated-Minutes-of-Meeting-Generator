@@ -18,6 +18,7 @@ from werkzeug.utils import secure_filename
 from config import (
     ALLOWED_AUDIO_EXTENSIONS,
     DATA_DIR,
+    ENABLE_DIARIZATION,
     GISTS_DIR,
     MOM_OUTPUT_DIR,
     PROCESSED_DIR,
@@ -27,6 +28,8 @@ from config import (
     SMTP_USER,
     UPLOADS_DIR,
 )
+# Formatting only — must not pull torch/pyannote at import time.
+from pipelines.diarization import format_transcript_segments
 from pipelines.llm_inference import mom_temp_path, run_llm_on_transcript
 from pipelines.preprocess import preprocess_audio
 from pipelines.stt import load_whisper, transcribe
@@ -222,13 +225,7 @@ def upload():
     try:
         load_whisper()
         segments = transcribe(str(processed_path))
-        lines = []
-        for s in segments:
-            start = f"{s.get('start', 0.0):.2f}"
-            end = f"{s.get('end', 0.0):.2f}"
-            text = s.get("text", "").strip()
-            lines.append(f"[{start} - {end}] {text}")
-        transcript = "\n".join(lines)
+        transcript = format_transcript_segments(segments)
     except Exception:
         logger.exception(
             "Speech-to-text failed for upload %s (request %s)",
@@ -237,6 +234,41 @@ def upload():
         )
         _remove_file_if_exists(processed_path)
         return jsonify({"error": "Speech-to-text transcription failed."}), 500
+
+    # --- Optional speaker diarization (best-effort; never fails the upload) ---
+    # Import diarize/align only when enabled so missing torch/pyannote cannot
+    # break the default (disabled) path at module import time.
+    if ENABLE_DIARIZATION:
+        try:
+            from pipelines.diarization import (
+                assign_speakers_to_transcript,
+                diarize,
+            )
+
+            diar_segments = diarize(str(processed_path))
+            if diar_segments:
+                labelled = assign_speakers_to_transcript(segments, diar_segments)
+                transcript = format_transcript_segments(labelled)
+                logger.info(
+                    "Diarization applied for upload %s (request %s, %s turns)",
+                    safe_name,
+                    request_id,
+                    len(diar_segments),
+                )
+            else:
+                logger.info(
+                    "Diarization returned no turns for upload %s (request %s); "
+                    "keeping unlabeled transcript",
+                    safe_name,
+                    request_id,
+                )
+        except Exception:
+            logger.exception(
+                "Diarization failed for upload %s (request %s); "
+                "continuing with unlabeled transcript",
+                safe_name,
+                request_id,
+            )
 
     # --- Stage: persist transcript ---
     try:
@@ -252,6 +284,9 @@ def upload():
         return jsonify({"error": "Failed to save transcript."}), 500
     logger.info("Transcript saved for %s (request %s)", safe_name, request_id)
 
+    # Optional gist: normalize once for LLM context and post-success persistence.
+    meeting_context = (gist_text or "").strip() or None
+
     # --- Stage: LLM MoM generation ---
     try:
         output_file = run_llm_on_transcript(
@@ -259,6 +294,7 @@ def upload():
             output_stem=base_name,
             request_id=request_id,
             temp_file=mom_tmp,
+            meeting_context=meeting_context,
         )
     except Exception:
         logger.exception(
@@ -274,9 +310,9 @@ def upload():
     # Intermediate processed audio is no longer needed after a successful run.
     _remove_file_if_exists(processed_path)
 
-    if gist_text:
+    if meeting_context:
         GISTS_DIR.mkdir(parents=True, exist_ok=True)
-        gist_file.write_text(gist_text, encoding="utf-8")
+        gist_file.write_text(meeting_context, encoding="utf-8")
 
     return jsonify({
         "redirect": url_for(

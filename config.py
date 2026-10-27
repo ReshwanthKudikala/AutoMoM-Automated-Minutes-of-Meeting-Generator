@@ -104,6 +104,16 @@ FLASK_DEBUG = parse_bool_env(
 	env_name="FLASK_DEBUG",
 )
 
+# Optional pyannote speaker diarization on upload (default: off).
+# When enabled, requires Hugging Face access to gated pyannote models
+# (typically HF_TOKEN / HUGGING_FACE_HUB_TOKEN) and may download weights
+# on first use. Failures fall back to unlabeled transcripts.
+ENABLE_DIARIZATION = parse_bool_env(
+	os.getenv("ENABLE_DIARIZATION"),
+	default=False,
+	env_name="ENABLE_DIARIZATION",
+)
+
 # Email configuration
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")

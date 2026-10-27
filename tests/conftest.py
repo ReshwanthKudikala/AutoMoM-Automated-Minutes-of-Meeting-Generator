@@ -63,6 +63,9 @@ def app(tmp_path, monkeypatch):
     monkeypatch.setattr(upload_mod, "PROCESSED_DIR", processed)
     monkeypatch.setattr(upload_mod, "GISTS_DIR", gists)
     monkeypatch.setattr(upload_mod, "MOM_OUTPUT_DIR", mom_output)
+    # Keep diarization off by default in route tests (opt-in per test).
+    monkeypatch.setattr(config, "ENABLE_DIARIZATION", False)
+    monkeypatch.setattr(upload_mod, "ENABLE_DIARIZATION", False)
 
     application = create_app()
     application.config["TESTING"] = True
