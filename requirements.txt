@@ -14,3 +14,4 @@ transformers
 pyannote.audio
 whisper
 markdown
+pytest>=7.0
